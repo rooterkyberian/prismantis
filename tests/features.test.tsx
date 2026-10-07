@@ -15,7 +15,7 @@ const engine = (on: On) =>
 
 const call = (tool: string, input: unknown, id: string) => ({ tool_use_id: id, tool, input, isRunning: false, isErrored: false, isInterrupted: false })
 
-test('collapsed tool groups draw one summary line', async $ => {
+test('collapsed tool groups draw one summary line', { options: { toolStyle: 'classic' } }, async $ => {
   const ui = await $.ui.mount({
     plugin: 'prismantis',
     surface: 'terminal',
@@ -141,6 +141,7 @@ test('your prompts carry the render hint as model-only context', async ($, on) =
   })
   await $.prompt.submit({ text: 'show me deploys per day', wait: false, origin: { kind: 'composer' } })
   expect(seen[0]?.some(c => c.includes('prismantis'))).toBe(true)
+  expect(seen[0]?.some(c => c.includes('fenced block') && c.includes('copy button'))).toBe(true)
 })
 
 test('no render hint when diagramHints is off', { options: { diagramHints: false } }, async ($, on) => {
@@ -230,9 +231,11 @@ test('a full reply draws every element itself, with the right copy buttons', asy
   expect(await ui.find({ type: 'Text', text: /^engine$/ })).toBeUndefined()
   expect((await ui.find({ type: 'Text', text: /^Name$/ }))?.props.color).toBe(t.tableHeader)
   const labels = (await ui.findAll({ type: 'Button' })).map(b => b.props.label)
-  expect(labels.filter(l => l === '⧉ copy').length).toBe(5)
+  expect(labels.filter(l => l === '⧉ copy').length).toBe(4)
+  expect(labels.filter(l => l === '⧉ md').length).toBe(1)
+  expect(labels.filter(l => l === '⧉ html').length).toBe(1)
   expect(labels.filter(l => l === '⧉ source').length).toBe(3)
-  expect(labels.filter(l => l === '⧉ art').length).toBe(3)
+  expect(labels.filter(l => l === '⧉ art').length).toBe(4)
   expect((await ui.findAll({ type: 'Box' })).some(b => b.props.flexWrap === 'wrap')).toBe(true)
   await ui.unmount()
 })
@@ -270,4 +273,181 @@ test('/prismantis rejects unknown themes and lists the real ones', async ($, on)
   expect(bad.text?.startsWith('Unknown theme "neon".')).toBe(true)
   const list = await $.command.run({ command: 'prismantis', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
   expect(list.text?.includes('dracula')).toBe(true)
+})
+
+test('task list items parse as checked or open, nested ones too', async () => {
+  const [list] = parse('- [ ] write tests\n- [x] ship it\n  - [X] nested done\n- plain', { numbers: false, paths: false })
+  if (list?.kind !== 'list') throw new Error('not a list')
+  expect(list.items.map(i => i.task)).toEqual([false, true, true, undefined])
+  expect(list.items[0]?.inline).toEqual([{ kind: 'text', text: 'write tests' }])
+})
+
+test('task lists draw brackets and check marks, done items dimmed and struck through', async $ => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'prismantis', component: 'AssistantMessage', props: { text: '- [ ] todo\n- [x] done', isFirstOfReply: true }, viewport: { columns: 80, rows: 20 }, surface })
+    expect((await ui.find({ type: 'Text', text: /^\[ \] $/ }))?.props.color).toBe(PRESETS['catppuccin-mocha'].bullet)
+    expect(await ui.find({ type: 'Text', text: /^\[✓\] $/ })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^done$/ }))?.props).toMatchObject({ dimColor: true, strikethrough: true })
+    expect((await ui.find({ type: 'Text', text: /^todo$/ }))?.props.dimColor).toBeFalsy()
+    await ui.unmount()
+  }
+})
+
+const tasks = (surface: 'terminal' | 'desktop') => ({ plugin: 'prismantis', component: 'AssistantMessage' as const, props: { text: '- [ ] todo\n- [x] done', isFirstOfReply: true }, viewport: { columns: 80, rows: 20 }, surface })
+
+test('taskStyle progress draws ticks under a done-count bar', { options: { taskStyle: 'progress' } }, async $ => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount(tasks(surface))
+    expect(await ui.find({ type: 'Text', text: /^ 1\/2 done$/ })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^━{10}$/ }))?.props.color).toBe(PRESETS['catppuccin-mocha'].accent)
+    expect(await ui.find({ type: 'Text', text: /^○ $/ })).toBeDefined()
+    expect((await ui.find({ type: 'Text', text: /^✓ $/ }))?.props.color).toBe(PRESETS['catppuccin-mocha'].accent)
+    expect((await ui.find({ type: 'Text', text: /^done$/ }))?.props).toMatchObject({ dimColor: true, strikethrough: false })
+    await ui.unmount()
+  }
+})
+
+test('taskStyle box draws a box and a tick', { options: { taskStyle: 'box' } }, async $ => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount(tasks(surface))
+    expect(await ui.find({ type: 'Text', text: /^□ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^✓ $/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ 1\/2 done$/ })).toBeUndefined()
+    expect((await ui.find({ type: 'Text', text: /^done$/ }))?.props.strikethrough).toBe(true)
+    await ui.unmount()
+  }
+})
+
+test('markdown links and bare URLs draw as clickable links', async $ => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ plugin: 'prismantis', component: 'AssistantMessage', props: { text: 'See [the docs](https://example.com/docs) or https://example.com/raw for more.', isFirstOfReply: true }, viewport: { columns: 100, rows: 20 }, surface })
+    const links = await ui.findAll({ type: 'Link' })
+    expect(links.map(l => l.props.href)).toEqual(['https://example.com/docs', 'https://example.com/raw'])
+    expect((await ui.find({ type: 'Text', text: /^the docs$/ }))?.props.underline).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /\(https:\/\/example\.com\/docs\)/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^https:\/\/example\.com\/raw$/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+const run = (args: string) => ({ command: 'prismantis', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 120 } })
+
+const transcript = (on: On, messages: { role: 'user' | 'assistant'; text: string }[]) => {
+  const copied: string[] = []
+  on('session.messages', () => ({ value: messages.map(m => ({ ...m, toolUses: [] })) }))
+  on('ui.copy', (_, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true as const } }
+  })
+  return copied
+}
+
+test('/prismantis copy copies the last reply without a mouse', async ($, on) => {
+  const copied = transcript(on, [{ role: 'user', text: 'hi' }, { role: 'assistant', text: 'old' }, { role: 'user', text: 'again' }, { role: 'assistant', text: 'שלום, the newest reply' }])
+  const result = await $.command.run(run('copy'))
+  expect(copied).toEqual(['שלום, the newest reply'])
+  expect(result.text).toBe('Copied the last reply.')
+})
+
+test('/prismantis copy code copies the last code block of the last reply', async ($, on) => {
+  const copied = transcript(on, [{ role: 'assistant', text: 'Run:\n\n```bash\nls\n```\n\nthen:\n\n```bash\nnpm test\n```' }])
+  const result = await $.command.run(run('copy code'))
+  expect(copied).toEqual(['npm test'])
+  expect(result.text).toBe('Copied the last code block.')
+})
+
+test('/prismantis copy says so when there is nothing to copy', async ($, on) => {
+  const copied = transcript(on, [{ role: 'assistant', text: 'no code here' }])
+  expect((await $.command.run(run('copy code'))).text).toBe('The last reply has no code block.')
+  expect(copied).toEqual([])
+})
+
+const prompt = (text: string, kind: 'composer' | 'task-notification' = 'composer', surface: 'terminal' | 'desktop' = 'terminal') =>
+  ({ plugin: 'prismantis', component: 'UserMessage' as const, props: { text, origin: { kind } as never, isExpanded: true }, viewport: { columns: 80, rows: 10 }, surface })
+
+test('your prompts draw in a rounded accent bubble by default', async $ => {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount(prompt('how many frog raids?', 'composer', surface))
+    const bubble = (await ui.findAll({ type: 'Box' })).find(b => b.props.borderStyle === 'round')
+    expect(bubble?.props.borderColor).toBe(PRESETS['catppuccin-mocha'].accent)
+    expect((await ui.find({ type: 'Text', text: /^how many frog raids\?$/ }))?.props.color).toBe(PRESETS['catppuccin-mocha'].heading)
+    await ui.unmount()
+  }
+})
+
+test('promptStyle bar draws an accent bar', { options: { promptStyle: 'bar' } }, async $ => {
+  const ui = await $.ui.mount(prompt('hi'))
+  expect((await ui.find({ type: 'Text', text: /^▌ $/ }))?.props.color).toBe(PRESETS['catppuccin-mocha'].accent)
+  expect((await ui.findAll({ type: 'Box' })).some(b => b.props.borderStyle)).toBe(false)
+  await ui.unmount()
+})
+
+test('promptStyle chevron draws a bold accent prompt', { options: { promptStyle: 'chevron' } }, async $ => {
+  const ui = await $.ui.mount(prompt('hi'))
+  expect(await ui.find({ type: 'Text', text: /^› $/ })).toBeDefined()
+  expect((await ui.find({ type: 'Text', text: /^hi$/ }))?.props).toMatchObject({ bold: true, color: PRESETS['catppuccin-mocha'].accent })
+  await ui.unmount()
+})
+
+test('promptStyle off and task notifications keep the engine look', { options: { promptStyle: 'off' } }, async ($, on) => {
+  engine(on)
+  const ui = await $.ui.mount(prompt('hi'))
+  expect(await ui.find({ type: 'Text', text: /^engine$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('task notifications are not drawn as your prompt', async ($, on) => {
+  engine(on)
+  const ui = await $.ui.mount(prompt('task done', 'task-notification'))
+  expect(await ui.find({ type: 'Text', text: /^engine$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a Hebrew prompt bubble sits on the right', { options: { rtl: 'warp' } }, async $ => {
+  const ui = await $.ui.mount(prompt('כמה פשיטות היו השבוע?'))
+  expect((await ui.findAll({ type: 'Box' })).find(b => b.props.borderStyle === 'round')?.props.alignSelf).toBe('flex-end')
+  await ui.unmount()
+})
+
+test('an unstamped prompt is yours, a teammate message is not', async ($, on) => {
+  engine(on)
+  const mine = await $.ui.mount(prompt('typed on the command line', 'unclassified' as never))
+  expect((await mine.findAll({ type: 'Box' })).some(b => b.props.borderStyle === 'round')).toBe(true)
+  await mine.unmount()
+  const peer = await $.ui.mount({ ...prompt('from a teammate', 'unclassified' as never), props: { text: 'from a teammate', origin: { kind: 'unclassified' } as never, isExpanded: true, from: { name: 'bob' } as never } })
+  expect(await peer.find({ type: 'Text', text: /^engine$/ })).toBeDefined()
+  await peer.unmount()
+})
+
+const readRow = { plugin: 'prismantis', component: 'ToolUse' as const, props: call('Read', { file_path: '/tmp/x' }, 'ts-1'), viewport: { columns: 100, rows: 10 }, surface: 'terminal' as const }
+
+test('chat puts tool rows on the right, dimmed, by default', async $ => {
+  const ui = await $.ui.mount(readRow)
+  expect((await ui.findAll({ type: 'Box' })).some(b => b.props.justifyContent === 'flex-end')).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /⎿/ })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Text' })).find(t => t.props.wrap === 'truncate-end')?.props.dimColor).toBe(true)
+  await ui.unmount()
+})
+
+test('toolStyle tree-dim tucks tool rows under the sentence', { options: { toolStyle: 'tree-dim' } }, async $ => {
+  const ui = await $.ui.mount(readRow)
+  expect((await ui.find({ type: 'Text', text: /^ {2}⎿ $/ }))?.props.color).toBe(PRESETS['catppuccin-mocha'].number)
+  expect((await ui.findAll({ type: 'Text' })).find(t => t.props.wrap === 'truncate-end')?.props.dimColor).toBe(true)
+  await ui.unmount()
+})
+
+test('toolStyle classic is the original look', { options: { toolStyle: 'classic' } }, async $ => {
+  const ui = await $.ui.mount(readRow)
+  expect(await ui.find({ type: 'Text', text: /⎿/ })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Text' })).find(t => t.props.wrap === 'truncate-end')?.props.dimColor).toBe(false)
+  await ui.unmount()
+})
+
+test('toolStyle tree-bold draws one-line narration in bold', { options: { toolStyle: 'tree-bold' } }, async $ => {
+  const one = await $.ui.mount({ plugin: 'prismantis', component: 'AssistantMessage', props: { text: 'Checking the tests next.', isFirstOfReply: true }, viewport: { columns: 80, rows: 10 }, surface: 'terminal' })
+  expect((await one.find({ type: 'Text', text: /^Checking the tests next\.$/ }))?.props.bold).toBe(true)
+  await one.unmount()
+  const long = await $.ui.mount({ plugin: 'prismantis', component: 'AssistantMessage', props: { text: 'First.\n\nSecond.', isFirstOfReply: true }, viewport: { columns: 80, rows: 10 }, surface: 'terminal' })
+  expect((await long.find({ type: 'Text', text: /^First\.$/ }))?.props.bold).toBeFalsy()
+  await long.unmount()
 })

@@ -1,7 +1,8 @@
 import type { ElementTable, RenderElement } from 'claude-code'
 
+import { tableHtml, tableText } from './html'
 import type { Block, Inline } from './markdown'
-import { inlineText } from './markdown'
+import { displayText, inlineText } from './markdown'
 import { commentTail, commentVisual, flow, hasRtl } from './rtl'
 import type { Style, Theme } from './theme'
 import type { PrismToken } from './vendor/prism.js'
@@ -10,9 +11,62 @@ import { languages, tokenize } from './vendor/prism.js'
 const WIDE = /[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]|\p{Extended_Pictographic}/u
 const segmenter = typeof Intl !== 'undefined' && 'Segmenter' in Intl ? new Intl.Segmenter() : undefined
 
-export const width = (s: string): number => {
-  const graphemes = segmenter ? [...segmenter.segment(s)].map(g => g.segment) : [...s]
-  return graphemes.reduce((w, g) => (/^\p{M}+$/u.test(g) ? w : w + (WIDE.test(g) ? 2 : 1)), 0)
+const graphemes = (s: string): string[] => (segmenter ? [...segmenter.segment(s)].map(g => g.segment) : [...s])
+
+export const width = (s: string): number =>
+  graphemes(s).reduce((w, g) => (/^\p{M}+$/u.test(g) ? w : w + (WIDE.test(g) ? 2 : 1)), 0)
+
+const wrapRanges = (text: string, w: number): [number, number][] => {
+  if (width(text) <= w) return [[0, text.length]]
+  const out: [number, number][] = []
+  let line: [number, number] | undefined
+  for (const word of text.matchAll(/\S+/g)) {
+    let start = word.index
+    const end = start + word[0].length
+    while (width(text.slice(start, end)) > w) {
+      if (line) out.push(line)
+      line = undefined
+      let cut = start
+      for (const g of graphemes(text.slice(start, end))) {
+        if (cut > start && width(text.slice(start, cut + g.length)) > w) break
+        cut += g.length
+      }
+      out.push([start, cut])
+      start = cut
+    }
+    if (start === end) continue
+    if (line && width(text.slice(line[0], end)) <= w) line = [line[0], end]
+    else {
+      if (line) out.push(line)
+      line = [start, end]
+    }
+  }
+  if (line) out.push(line)
+  return out.length ? out : [[0, 0]]
+}
+
+const sliceInline = (nodes: Inline[], from: number, to: number): Inline[] => {
+  const out: Inline[] = []
+  let at = 0
+  for (const n of nodes) {
+    const length = inlineText([n]).length
+    const a = Math.max(from - at, 0)
+    const b = Math.min(to - at, length)
+    at += length
+    if (a >= b) continue
+    if ('children' in n) out.push({ ...n, children: sliceInline(n.children, a, b) })
+    else out.push({ ...n, text: n.text.slice(a, b) })
+  }
+  return out
+}
+
+const hasLink = (nodes: Inline[]): boolean => nodes.some(n => n.kind === 'link' || ('children' in n && hasLink(n.children)))
+
+const mostLines = (text: string, w: number): number => (text.match(/\S+/g)?.length ?? 0) + Math.ceil(width(text) / w)
+
+const wrapInline = (nodes: Inline[], w: number): Inline[][] => {
+  const text = inlineText(nodes)
+  return width(text) <= w ? [nodes] : wrapRanges(text, w).map(([a, b]) => sliceInline(nodes, a, b))
 }
 
 const flowOf = (style: Style, nodes: Inline[], columns: number) => (style.reorder ? flow(nodes, columns, width, style.shape) : null)
@@ -34,9 +88,9 @@ const renderInline = (el: ElementTable, style: Style, nodes: Inline[], keyBase: 
       case 'code':
         return <Text key={key} color={t.inlineCode}>{n.text}</Text>
       case 'link':
-        return n.text === n.href
-          ? <Text key={key} color={t.link} underline>{n.href}</Text>
-          : <Text key={key}><Text color={t.link} underline>{n.text}</Text><Text dimColor> ({n.href})</Text></Text>
+        return /^[a-z][\w+.-]*:/i.test(n.href)
+          ? n.text === n.href ? <el.Link key={key} href={n.href} /> : <el.Link key={key} href={n.href}><Text color={t.link} underline>{n.text}</Text></el.Link>
+          : <Text key={key} color={t.link} underline>{n.text}</Text>
       case 'number':
         return <Text key={key} color={t.number}>{n.text}</Text>
       case 'path':
@@ -47,7 +101,7 @@ const renderInline = (el: ElementTable, style: Style, nodes: Inline[], keyBase: 
   })
 }
 
-const renderFlow = (el: ElementTable, style: Style, lines: Inline[][], key: string, props: { italic?: boolean; color?: string } = {}) => {
+const renderFlow = (el: ElementTable, style: Style, lines: Inline[][], key: string, props: { italic?: boolean; color?: string; bold?: boolean } = {}) => {
   const { Text } = el
   return lines.map((line, i) => <Text key={`${key}.${i}`} {...props}>{renderInline(el, style, line, `${key}.${i}`)}</Text>)
 }
@@ -153,7 +207,16 @@ const columnWidths = (natural: number[], available: number, gap: number): number
   const room = Math.max(natural.length, available - gap * (natural.length - 1))
   const total = natural.reduce((a, b) => a + b, 0)
   if (total <= room) return natural
-  const widths = natural.map(w => Math.max(1, Math.floor((w * room) / total)))
+  const widths = natural.map(() => 0)
+  let open = natural.map((_, c) => c)
+  let left = room
+  for (let fits = [-1]; fits.length; ) {
+    const share = Math.floor(left / open.length)
+    fits = open.filter(c => natural[c]! <= share)
+    fits.forEach(c => (widths[c] = natural[c]!, left -= natural[c]!))
+    open = open.filter(c => !fits.includes(c))
+  }
+  open.forEach((c, i) => (widths[c] = Math.max(1, Math.floor(left / open.length) + (i < left % open.length ? 1 : 0))))
   while (widths.reduce((a, b) => a + b, 0) > room) {
     const widest = widths.indexOf(Math.max(...widths))
     if (widths[widest]! <= 1) break
@@ -162,23 +225,41 @@ const columnWidths = (natural: number[], available: number, gap: number): number
   return widths
 }
 
-const displayText = (inline: Inline[]): string =>
-  inline.map(n => (n.kind === 'link' && n.text !== n.href ? `${n.text} (${n.href})` : 'children' in n ? displayText(n.children) : n.text)).join('')
-
 const isRtlTable = (style: Style, block: Extract<Block, { kind: 'table' }>): boolean => {
   const cells = [...block.header, ...block.rows.flat()].filter(cell => displayText(cell).trim() !== '')
   return cells.filter(cell => flowOf(style, cell, Infinity)?.base === 'R').length * 2 > cells.length
+}
+
+const ART_WIDTH = 100
+
+export const tableArt = (block: Extract<Block, { kind: 'table' }>): string => {
+  const cells = [block.header, ...block.rows].map(r => block.header.map((_, c) => displayText(r[c] ?? [])))
+  const widths = columnWidths(block.header.map((_, c) => Math.max(...cells.map(r => width(r[c]!)))), ART_WIDTH - 4, 3)
+  const pad = (text: string, c: number, align: 'left' | 'right' | 'center') => {
+    const room = widths[c]! - width(text)
+    const left = align === 'right' ? room : align === 'center' ? Math.floor(room / 2) : 0
+    return ' '.repeat(left) + text + ' '.repeat(room - left)
+  }
+  const line = (l: string, m: string, r: string) => l + widths.map(w => '─'.repeat(w + 2)).join(m) + r
+  const row = (r: string[], header: boolean) => {
+    const lines = r.map((text, c) => wrapRanges(text, widths[c]!).map(([a, b]) => text.slice(a, b)))
+    return Array.from({ length: Math.max(...lines.map(l => l.length)) }, (_, i) =>
+      `│ ${lines.map((l, c) => pad(l[i] ?? '', c, header ? 'center' : block.align[c] ?? 'left')).join(' │ ')} │`)
+  }
+  const art = [line('┌', '┬', '┐'), ...row(cells[0]!, true), ...cells.slice(1).flatMap(r => [line('├', '┼', '┤'), ...row(r, false)]), line('└', '┴', '┘')]
+  return ['```', ...art, '```'].join('\n')
 }
 
 const renderTable = (el: ElementTable, style: Style, block: Extract<Block, { kind: 'table' }>, columns: number, key: string) => {
   const { Box, Text } = el
   const t = style.theme
   const rtl = isRtlTable(style, block)
-  const gap = style.tableStyle === 'grid' ? 3 : 2
+  const box = style.tableStyle === 'box'
+  const gap = box ? 0 : style.tableStyle === 'grid' ? 3 : 2
   const natural = block.header.map((h, c) =>
     Math.max(width(displayText(h)), ...block.rows.map(r => width(displayText(r[c] ?? [])))),
   )
-  const widths = columnWidths(natural, columns, gap)
+  const widths = box ? columnWidths(natural, columns - 4, 3) : columnWidths(natural, columns, gap)
   const order = natural.map((_, c) => c)
   if (rtl) order.reverse()
   const ruleChar = style.tableStyle === 'grid' ? '━' : '─'
@@ -195,23 +276,60 @@ const renderTable = (el: ElementTable, style: Style, block: Extract<Block, { kin
     </Box>
   )
 
-  const row = (cells: Inline[][], k: string, isHeader: boolean) => (
-    <Box key={k} flexDirection="row" columnGap={gap}>
-      {order.map(c => {
+  const bar = (k: string, text: string, lines = 1) => (
+    <Text key={k} color={t.tableRule} dimColor={!t.tableRule}>{Array.from({ length: lines }, () => text).join('\n')}</Text>
+  )
+  const clipped = (lines: number) => (k: string, text: string) => (
+    <Box key={k} minWidth={width(text)}>
+      <Box position="absolute" top={0} bottom={0} left={0} minWidth={width(text)} overflow="hidden">
+        {bar(`${k}.b`, text, lines)}
+      </Box>
+    </Box>
+  )
+  const edge = (k: string, [left, fill, mid, right]: string) =>
+    bar(k, left + order.map(c => fill!.repeat(widths[c]! + 2)).join(mid) + right)
+
+  const row = (cells: Inline[][], k: string, isHeader: boolean, border: (k: string, text: string) => RenderElement = bar) => (
+    <Box key={k} flexDirection="row" columnGap={gap} alignItems="stretch">
+      {box && border(`${k}.l`, '│ ')}
+      {order.map((c, i) => {
         const w = widths[c]!
         const cell = flowOf(style, cells[c] ?? [], Infinity)
         const content = cell ? cell.lines[0]! : (cells[c] ?? [])
         const side = cell?.base === 'R' && block.align[c] !== 'center' ? 'flex-end' : justify(c)
-        return (
+        const cellBox = (
           <Box key={`${k}.${c}`} width={w} flexShrink={0} justifyContent={side}>
             {isHeader
               ? <Text bold color={t.tableHeader}>{inlineText(content)}</Text>
               : <Text>{renderInline(el, style, content, `${k}.${c}`)}</Text>}
           </Box>
         )
+        return box && i > 0 ? [border(`${k}.${c}s`, ' │ '), cellBox] : cellBox
       })}
+      {box && border(`${k}.r`, ' │')}
     </Box>
   )
+
+  const wrappedRow = (cells: Inline[][], k: string, isHeader: boolean) => {
+    if (!isHeader && cells.some(hasLink)) return [row(cells, k, isHeader, clipped(Math.max(1, ...widths.map((w, c) => mostLines(displayText(cells[c] ?? []), w)))))]
+    const wrapped = widths.map((w, c) => {
+      const content = cells[c] ?? []
+      if (natural[c]! <= w) return [content]
+      return wrapInline(isHeader ? [{ kind: 'text', text: inlineText(content) }] : content, w)
+    })
+    return Array.from({ length: Math.max(...wrapped.map(l => l.length)) }, (_, i) =>
+      row(wrapped.map(l => l[i] ?? []), `${k}.${i}`, isHeader))
+  }
+
+  if (box) {
+    const lines: RenderElement[] = [edge(`${key}.t`, '┌─┬┐'), ...wrappedRow(block.header, `${key}.h`, true), edge(`${key}.hr`, '╞═╪╡')]
+    block.rows.forEach((r, i) => {
+      if (i > 0) lines.push(edge(`${key}.r${i}r`, '├─┼┤'))
+      lines.push(...wrappedRow(r, `${key}.r${i}`, false))
+    })
+    lines.push(edge(`${key}.b`, '└─┴┘'))
+    return <Box key={key} flexDirection="column" {...(rtl ? { alignSelf: 'flex-end' as const } : {})}>{lines}</Box>
+  }
 
   const body: RenderElement[] = [row(block.header, `${key}.h`, true), rule(`${key}.hr`, true)]
   block.rows.forEach((r, i) => {
@@ -254,7 +372,7 @@ const renderParagraph = (el: ElementTable, style: Style, block: Extract<Block, {
   const { Box, Text } = el
   const rtl = flowOf(style, block.inline, columns)
   if (rtl?.base === 'R') return <Box key={key} flexDirection="column" alignItems="flex-end">{renderFlow(el, style, rtl.lines, key)}</Box>
-  return <Text key={key}>{renderInline(el, style, rtl ? rtl.lines[0]! : block.inline, key)}</Text>
+  return <Text key={key} bold={style.narration}>{renderInline(el, style, rtl ? rtl.lines[0]! : block.inline, key)}</Text>
 }
 
 const renderQuote = (el: ElementTable, style: Style, block: Extract<Block, { kind: 'quote' }>, columns: number, key: string) => {
@@ -299,27 +417,42 @@ const renderAlert = (el: ElementTable, style: Style, block: Extract<Block, { kin
   )
 }
 
+const TASK_GLYPHS = { checks: ['[ ]', '[✓]'], ticks: ['○', '✓'], box: ['□', '✓'], progress: ['○', '✓'] } as const
+
 const renderList = (el: ElementTable, style: Style, block: Extract<Block, { kind: 'list' }>, columns: number, key: string) => {
   const { Box, Text } = el
   const t = style.theme
+  const tasks = block.items.filter(item => item.task !== undefined)
+  const done = tasks.filter(item => item.task).length
+  const filled = tasks.length ? Math.round((done / tasks.length) * 20) : 0
+  const strike = style.taskStyle === 'checks' || style.taskStyle === 'box'
+  const tick = style.taskStyle === 'ticks' || style.taskStyle === 'progress'
   return (
     <Box key={key} flexDirection="column">
+      {style.taskStyle === 'progress' && tasks.length > 0 && (
+        <Text>
+          <Text color={t.accent}>{'━'.repeat(filled)}</Text>
+          <Text color={t.bullet} dimColor>{'─'.repeat(20 - filled)}</Text>
+          <Text color={t.bullet}>{` ${done}/${tasks.length} done`}</Text>
+        </Text>
+      )}
       {block.items.map((item, i) => {
         const k = `${key}.${i}`
-        const glyph = /\d/.test(item.marker) ? item.marker : item.depth ? '◦' : '•'
-        const rtl = flowOf(style, item.inline, columns - item.depth * 2 - 2)
+        const glyph = item.task !== undefined ? TASK_GLYPHS[style.taskStyle][item.task ? 1 : 0] : /\d/.test(item.marker) ? item.marker : item.depth ? '◦' : '•'
+        const glyphColor = item.task && tick ? t.accent : t.bullet
+        const rtl = flowOf(style, item.inline, columns - item.depth * 2 - glyph.length - 1)
         if (rtl?.base === 'R') {
           return (
             <Box key={k} flexDirection="row" justifyContent="flex-end" paddingRight={item.depth * 2}>
               <Box flexDirection="column" alignItems="flex-end">{renderFlow(el, style, rtl.lines, k)}</Box>
-              <Text color={t.bullet}>{` ${glyph}`}</Text>
+              <Text color={glyphColor}>{` ${glyph}`}</Text>
             </Box>
           )
         }
         return (
           <Box key={k} flexDirection="row" paddingLeft={item.depth * 2}>
-            <Text color={t.bullet}>{`${glyph} `}</Text>
-            <Text>{renderInline(el, style, rtl ? rtl.lines[0]! : item.inline, k)}</Text>
+            <Text color={glyphColor}>{`${glyph} `}</Text>
+            <Text dimColor={item.task === true} strikethrough={item.task === true && strike}>{renderInline(el, style, rtl ? rtl.lines[0]! : item.inline, k)}</Text>
           </Box>
         )
       })}
@@ -327,7 +460,7 @@ const renderList = (el: ElementTable, style: Style, block: Extract<Block, { kind
   )
 }
 
-export type CopyButton = (text: string, key: string, label?: string) => RenderElement | null
+export type CopyButton = (text: string | (() => string), key: string, label?: string, html?: () => string) => RenderElement | null
 export type Drawn = Map<number, { element: RenderElement; art: string }>
 
 const copySource = (block: Block): string | undefined =>
@@ -371,13 +504,17 @@ export const renderBlocks = (el: ElementTable, style: Style, blocks: Block[], co
     const block = blocks[b]
     const text = block ? copySource(block) : undefined
     const isPlainCode = block?.kind === 'code' && !drawn.has(b)
-    const art = drawn.get(b)?.art
-    const button = text === undefined || isPlainCode ? null : art === undefined ? copy?.(text, `copy${b}`) : (
+    const art = drawn.get(b)?.art ?? (block?.kind === 'table' ? () => tableArt(block) : undefined)
+    const first = text === undefined || isPlainCode ? null : copy?.(text, `copy${b}`, block?.kind === 'table' ? '⧉ md' : art === undefined ? undefined : '⧉ source')
+    const second = first && art !== undefined ? copy?.(art, `art${b}`, '⧉ art') : null
+    const html = first && block?.kind === 'table' ? copy?.(() => tableText(block), `html${b}`, '⧉ html', () => tableHtml(block)) : null
+    const button = second ? (
       <el.Box key={`copies${b}`} flexDirection="row" columnGap={1}>
-        {copy?.(text, `copy${b}`, '⧉ source')}
-        {copy?.(art, `art${b}`, '⧉ art')}
+        {first}
+        {second}
+        {html}
       </el.Box>
-    )
+    ) : first
     if (!button) return element
     const { Box } = el
     const rtl = style.reorder && block !== undefined && hasRtl(block.raw)
@@ -427,7 +564,25 @@ const field = (input: unknown, ...keys: string[]): string | undefined => {
   return undefined
 }
 
-export const renderToolRow = (el: ElementTable, style: Style, row: ToolRow): RenderElement => {
+const toolDim = (style: Style) => style.toolStyle !== "classic"
+
+const toolGutter = ({ Box, Text }: ElementTable, style: Style, color: string | undefined, running: boolean) =>
+  style.toolStyle.startsWith("tree")
+    ? <Box width={4} flexShrink={0}><Text color={color}>{'  ⎿ '}</Text></Box>
+    : <Box width={2} flexShrink={0}><Text color={color}>{running ? '◌' : '●'}</Text></Box>
+
+const toolLayout = (el: ElementTable, style: Style, columns: number, label: string, color: string | undefined, running: boolean, text: RenderElement) => {
+  const { Box, Text } = el
+  if (style.toolStyle !== "chat") return <Box flexDirection="row">{toolGutter(el, style, color, running)}{text}</Box>
+  const w = Math.min(width(label) + 2, Math.max(20, Math.floor(columns * 0.6)))
+  return (
+    <Box flexDirection="row" justifyContent="flex-end" width="100%">
+      <Box width={w} flexDirection="row">{text}<Text color={color}>{running ? " ◌" : " ●"}</Text></Box>
+    </Box>
+  )
+}
+
+export const renderToolRow = (el: ElementTable, style: Style, row: ToolRow, columns = 100): RenderElement => {
   const { Box, Text } = el
   const t = style.theme
   const isShell = row.tool === 'Bash' || row.tool === 'PowerShell'
@@ -438,19 +593,15 @@ export const renderToolRow = (el: ElementTable, style: Style, row: ToolRow): Ren
   const dot = row.isErrored ? t.codeFlag : row.isInterrupted ? t.codeComment : row.isRunning ? t.accent : t.number
   const isPath = target !== undefined && /^(~|\.{0,2}\/|[A-Za-z]:\\)/.test(target)
 
-  return (
-    <Box flexDirection="row">
-      <Box width={2} flexShrink={0}>
-        <Text color={dot}>{row.isRunning ? '◌' : '●'}</Text>
-      </Box>
-      <Text wrap="truncate-end">
-        <Text bold>{verb}</Text>
+  const label = `${verb}${target === undefined ? "" : ` ${target}`}${row.isInterrupted ? " interrupted" : row.isErrored ? " failed" : ""}`
+  return toolLayout(el, style, columns, label, dot, row.isRunning, (
+      <Text wrap="truncate-end" dimColor={toolDim(style)}>
+        <Text bold={!toolDim(style)} dimColor={toolDim(style)}>{verb}</Text>
         {target === undefined ? null : <Text> </Text>}
-        {target === undefined ? null : isShell ? codeLine(el, style, target, 'bash', 'cmd') : <Text color={isPath ? t.path : t.inlineCode}>{target}</Text>}
+        {target === undefined ? null : isShell ? codeLine(el, style, target, 'bash', 'cmd') : <Text color={isPath ? t.path : t.inlineCode} dimColor={toolDim(style)}>{target}</Text>}
         {row.isInterrupted ? <Text dimColor> interrupted</Text> : row.isErrored ? <Text color={t.codeFlag}> failed</Text> : null}
       </Text>
-    </Box>
-  )
+  ))
 }
 
 const OUTPUT_LINES = 120
@@ -520,7 +671,7 @@ export const groupSummary = (calls: readonly { tool: string }[]): string => {
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
-export const renderToolGroup = (el: ElementTable, style: Style, calls: readonly ToolRow[], isActive: boolean): RenderElement => {
+export const renderToolGroup = (el: ElementTable, style: Style, calls: readonly ToolRow[], isActive: boolean, columns = 100): RenderElement => {
   const { Box, Text } = el
   const t = style.theme
   const failed = calls.filter(c => c.isErrored).length
@@ -528,18 +679,14 @@ export const renderToolGroup = (el: ElementTable, style: Style, calls: readonly 
   const dot = failed ? t.codeFlag : running ? t.accent : t.number
   const last = calls[calls.length - 1]
   const lastTarget = last ? field(last.input, 'command', 'file_path', 'notebook_path', 'path', 'pattern', 'url', 'query', 'description')?.split('\n')[0] : undefined
-  return (
-    <Box flexDirection="row">
-      <Box width={2} flexShrink={0}>
-        <Text color={dot}>{running ? '◌' : '●'}</Text>
-      </Box>
-      <Text wrap="truncate-end">
-        <Text bold>{groupSummary(calls)}</Text>
+  const label = `${groupSummary(calls)}${failed ? ` · ${failed} failed` : ""}${lastTarget ? ` · last: ${lastTarget}` : ""}`
+  return toolLayout(el, style, columns, label, dot, running, (
+      <Text wrap="truncate-end" dimColor={toolDim(style)}>
+        <Text bold={!toolDim(style)} dimColor={toolDim(style)}>{groupSummary(calls)}</Text>
         {failed ? <Text color={t.codeFlag}>{` · ${failed} failed`}</Text> : null}
         {lastTarget ? <Text dimColor>{` · last: ${lastTarget}`}</Text> : null}
       </Text>
-    </Box>
-  )
+  ))
 }
 
 export const formatDuration = (ms: number): string => {
@@ -555,3 +702,24 @@ export const renderTurnDuration = ({ Text }: ElementTable, style: Style, word: s
     <Text color={style.theme.number}>{formatDuration(durationMs)}</Text>
   </Text>
 )
+
+export const renderUserPrompt = (el: ElementTable, style: Style, text: string, columns: number): RenderElement => {
+  const { Box, Text } = el
+  const t = style.theme
+  const color = style.promptStyle === 'chevron' ? t.accent : t.heading
+  const lines = text.split('\n').map(line => flowOf(style, [{ kind: 'text', text: line }], columns - 4))
+  const rtl = lines.some(l => l?.base === 'R')
+  const body = (
+    <Box flexDirection="column" {...(rtl ? { alignItems: 'flex-end' as const } : {})}>
+      {text.split('\n').map((line, i) => {
+        const flow = lines[i]
+        return flow ? renderFlow(el, style, flow.lines, `p${i}`, { color, bold: style.promptStyle === 'chevron' }) : <Text key={`p${i}`} color={color} bold={style.promptStyle === 'chevron'}>{line}</Text>
+      })}
+    </Box>
+  )
+  if (style.promptStyle === 'bubble') {
+    return <Box borderStyle="round" borderColor={t.accent} paddingX={1} alignSelf={rtl ? 'flex-end' : 'flex-start'}>{body}</Box>
+  }
+  const mark = <Text color={t.accent} bold>{style.promptStyle === 'bar' ? (rtl ? ' ▐' : '▌ ') : rtl ? ' ‹' : '› '}</Text>
+  return <Box flexDirection="row" {...(rtl ? { justifyContent: 'flex-end' as const } : {})}>{rtl ? body : mark}{rtl ? mark : body}</Box>
+}

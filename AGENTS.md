@@ -8,8 +8,11 @@ Prismantis is a Claude Code mod that redraws assistant replies with themeable co
 | --- | --- |
 | `.claude-plugin/plugin.json` | manifest, every user option (`userConfig`), the `types` contract |
 | `.claude-plugin/marketplace.json` | makes the repo installable with `/plugin marketplace add NahumLitvin/prismantis` |
-| `hooks/register.tsx` | every hook (`ui.render` for AssistantMessage, CommandOutput, ToolUse, ToolGroup and TurnDuration, `prompt.submit`, and the `/prismantis` command via `session.start` and `command.run`) and all code that calls `$` |
+| `hooks/register.tsx` | every hook (`ui.render` for AssistantMessage, CommandOutput, ToolUse, ToolGroup and TurnDuration, `prompt.submit`, the `/prismantis` command via `session.start` and `command.run`, and the `$.prismantis` noun via `engine.create` and `prismantis.markdown`) and all code that calls `$` |
+| `types/index.d.ts` | the contract for `$.prismantis`, which other mods type against |
 | `hooks/markdown.ts` | markdown to blocks and inline nodes, pure |
+| `hooks/html.ts` | tables to escaped HTML and tab-separated text, pure |
+| `hooks/clipboard.ts` | native clipboard helper source and command construction, pure |
 | `hooks/render.tsx` | blocks to `Box`/`Text` trees, pure |
 | `hooks/theme.ts` | presets, color validation, option merging, pure |
 | `hooks/mermaid.tsx` | mermaid box art, pure |
@@ -23,18 +26,20 @@ Prismantis is a Claude Code mod that redraws assistant replies with themeable co
 ## Rules
 
 - Bundled code and copied palettes must be MIT. Check the license at the source repo, not a port or fork: GitHub's `license.spdx_id` misses licenses declared only in a README (Gruvbox), and ports can relicense (Tokyo Night's Neovim port is Apache-2.0, the original VS Code theme is MIT).
-- Add a dependency only when writing it ourselves is unreasonable. Use its latest release, prefer well-starred maintained projects, and record it in docs/THIRD_PARTY_NOTICES.md. The runtime dependencies today are beautiful-mermaid and Prism, both bundled. esbuild is build-time only. The mod runs no external programs.
+- Add a dependency only when writing it ourselves is unreasonable. Use its latest release, prefer well-starred maintained projects, and record it in docs/THIRD_PARTY_NOTICES.md. The bundled runtime dependencies today are beautiful-mermaid and Prism. esbuild is build-time only. The HTML table copy action runs macOS's built-in `osascript`, or an installed and running CopyQ on Linux; rendering runs no external programs.
 - Never copy code from other projects, including other mods. Read them to learn the API, then write our own.
 - No code comments. The why goes in the commit message or PR description.
 - Plugin names cannot start with `claude-`, `anthropic-` or `cc-plugin-`, and must not use other products' trademarks (no "Codex" in names).
-- No new feature flags or config knobs unless the user asked for them.
+- No new feature flags or config knobs unless the user asked for them. The exception is looks: a feature with more than one plausible look ships its top 3 or 4 styles behind one option (like `taskStyle`, `promptStyle`), Nahum picks only the default, every style is a step in `/prismantis setup` (#22), and each style has a real screenshot in the README next to the option.
+- Feature and fix PRs add their CHANGELOG entry under `## [Unreleased]` and leave the version alone. Only the release commit sets the version, so parallel PRs never fight over it.
+- Every user-visible feature ships with a sample in `/prismantis demo` (`showcaseText` in `hooks/help.ts`), and in the one-screen `/prismantis` help (`helpText`) when it fits. Extend the help tests in `tests/regressions.test.tsx` so dropping the sample fails.
 
 ## Mod API facts that bite
 
 - `$` cannot cross an import. Any function that takes `$` must be declared in `hooks/register.tsx`. `claude plugin validate` does not catch this; `claude plugin test` does ("hooks module did not load").
 - A render hook may not write `$.state`. Schedule work with `$.clock.after(0, ...)` and write from there; `read($, atom)` in the render subscribes and redraws when the value lands.
 - The built-in `Markdown` element has no theming props, which is why we parse and draw markdown ourselves.
-- `TextProps` has color, background, bold, italic, underline, strikethrough, dim and inverse. There is no font size on any surface.
+- `TextProps` has color, background, bold, italic, underline, strikethrough, dimColor and inverse. There is no font size on any surface.
 - `Image` draws only in terminals with the kitty graphics protocol (kitty, Ghostty); elsewhere it shows its `alt` text.
 - Installed (user-tier) plugins cannot change the system prompt: the built-in `sec-default` plugin skips their `prompt.compose`, `prompt.section` and `prompt.context` hooks. Add model-only context through `prompt.submit` instead. Tests do not run `sec-default`, so prove prompt changes in a live `claude --debug` session.
 - `userConfig` values are flat primitives. A `string` field with `options` becomes a picker in `/config`.
@@ -51,7 +56,7 @@ claude plugin test .
 tsc -p .
 ```
 
-`tsc -p .` needs `.claude-plugin/types/`, which appears after running `claude --plugin-dir .` once. Then see it render for real (`.claude/skills/live-check`). Tests prove the tree; only a screenshot proves the look. CI runs validate and test on Linux, macOS and Windows, plus a type-check, a check that `hooks/vendor` rebuilds byte for byte from `scripts/package-lock.json` and holds only MIT code, version agreement across `plugin.json`, `marketplace.json` and `docs/CHANGELOG.md`, a no-comments check, and a clean install. Pushing a `vX.Y.Z` tag publishes a GitHub release from the CHANGELOG section.
+`tsc -p .` needs `.claude-plugin/types/`, which appears after running `claude --plugin-dir .` once. Then see it render for real (`.claude/skills/live-check`): any change to what gets drawn needs a screenshot of `/prismantis demo` (and `/prismantis` when the help changed), looked at before the PR opens. Tests prove the tree; only a screenshot proves the look. CI runs validate and test on Linux, macOS and Windows, plus a type-check, a check that `hooks/vendor` rebuilds byte for byte from `scripts/package-lock.json` and holds only MIT code, version agreement across `plugin.json`, `marketplace.json` and `docs/CHANGELOG.md`, a no-comments check, and a clean install. Pushing a `vX.Y.Z` tag publishes a GitHub release from the CHANGELOG section.
 
 Performance and render regressions (CI gates snapshots and node counts):
 

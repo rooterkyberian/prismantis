@@ -24,7 +24,7 @@ test('pure Hebrew reverses and takes a right base', async () => {
 
 test('a Latin run inside Hebrew keeps its own order', async () => {
   expect(visual('שלום Warp')).toBe('Warp םולש')
-  expect(visual('שרת kore-supervisor רץ על פורט')).toBe('טרופ לע ץר kore-supervisor תרש')
+  expect(visual('שרת web-server רץ על פורט')).toBe('טרופ לע ץר web-server תרש')
 })
 
 test('hyphen and percent around a number follow the Hebrew base', async () => {
@@ -141,7 +141,7 @@ test('an English table with one Hebrew cell keeps its column order and side', { 
   const ui = await $.ui.mount(mount('| name | tag |\n|---|---|\n| web | שלום |\n| api | db |'))
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.indexOf('name') < texts.indexOf('tag')).toBe(true)
-  expect((await ui.findAll({ type: 'Box' })).some(b => b.props.alignSelf === 'flex-end')).toBe(false)
+  expect((await ui.findAll({ type: 'Box' })).some(b => b.key !== 'reply' && b.props.alignSelf === 'flex-end')).toBe(false)
   await ui.unmount()
 })
 

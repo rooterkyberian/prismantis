@@ -2,11 +2,20 @@ import type { On } from 'claude-code'
 import { expect, test } from 'claude-code/testing'
 
 import { helpText, showcaseText } from '../hooks/help'
+import { tableHtml, tableText } from '../hooks/html'
 import { parse } from '../hooks/markdown'
 import { mermaidText } from '../hooks/mermaid'
+import { tableArt } from '../hooks/render'
 import { PRESETS } from '../hooks/presets'
+import { clipboardEnv, recordCopies } from './clipboard-env'
 
 const hl = { numbers: true, paths: true }
+
+const tableOf = (source: string) => {
+  const [table] = parse(source, hl)
+  if (table?.kind !== 'table') throw new Error('not a table')
+  return table
+}
 
 const mount = (text: string, columns = 120) => ({
   plugin: 'prismantis',
@@ -16,13 +25,12 @@ const mount = (text: string, columns = 120) => ({
   surface: 'terminal' as const,
 })
 
+const drawn = (node: unknown): string =>
+  typeof node === 'string' ? node : ((node as { children?: unknown[] }).children ?? []).map(drawn).join('')
+
 const stubClipboard = (on: On) => {
-  const copied: string[] = []
-  on('ui.copy', (_, e) => {
-    copied.push(e.text)
-    return { value: { isCopied: true as const } }
-  })
-  return copied
+  clipboardEnv(on, 'other')
+  return recordCopies(on)
 }
 
 test('a long run of backticks parses in linear time', async () => {
@@ -40,19 +48,49 @@ test('a four-backtick fence keeps triple-backtick examples inside one code block
 })
 
 test('an escaped trailing pipe stays in the cell', async () => {
-  const [table] = parse('| a | b |\n|---|---|\n| x | y\\|', hl)
-  if (table?.kind !== 'table') throw new Error('not a table')
+  const table = tableOf('| a | b |\n|---|---|\n| x | y\\|')
   expect(table.rows[0]?.[1]?.map(n => ('text' in n ? n.text : '')).join('')).toBe('y|')
 })
 
-test('copying a table returns its exact markdown', async ($, on) => {
+for (const surface of ['terminal', 'desktop'] as const) test(`tables copy Markdown, and plain text in place of HTML, without a native clipboard on ${surface}`, async ($, on) => {
   const copied = stubClipboard(on)
   const source = '| a | b |\n|:--|--:|\n| `x\\|y` | **2** |'
-  const ui = await $.ui.mount(mount(source))
-  const [button] = await ui.findAll({ type: 'Button' })
-  await ui.press({ key: button!.key! })
-  expect(copied).toEqual([source])
+  const ui = await $.ui.mount({ ...mount(source), surface })
+  const buttons = await ui.findAll({ type: 'Button' })
+  expect(buttons.map(button => button.props.label)).toEqual(['⧉ md', '⧉ art', '⧉ html'])
+  await ui.press({ key: 'copy0' })
+  await ui.press({ key: 'html0' })
+  expect(copied).toEqual([source, 'a\tb\nx|y\t2'])
   await ui.unmount()
+})
+
+test('HTML table copying escapes content and preserves safe inline formatting', async () => {
+  const source = '| <Title> | Link |\n|:--:|--|\n| **bold *italic*** ~~old~~ `x<y` & "quoted" | [go](https://example.com/?a=1&b="2") |\n| <script>alert | [bad](javascript:alert) |\n| short |'
+  const table = tableOf(source)
+  const html = tableHtml(table)
+  expect(html).toContain('<th style="text-align: center">&lt;Title&gt;</th>')
+  expect(html).toContain('<em>italic</em>')
+  expect(html).toContain('<del>old</del>')
+  expect(html).toContain('<code style="white-space: pre-wrap">x&lt;y</code> &amp; &quot;quoted&quot;')
+  expect(html).toContain('<a href="https://example.com/?a=1&amp;b=&quot;2&quot;">go</a>')
+  expect(html).toContain('&lt;script&gt;alert')
+  expect(html).not.toContain('javascript:')
+  expect(html).toContain('<td style="text-align: left"></td>')
+})
+
+test('tab-separated copying quotes embedded separators and literal quotes', async () => {
+  const table = tableOf('| Name | Value |\n|--|--|\n| `a\tb` | "quoted" |')
+  expect(tableText(table)).toBe('Name\tValue\n"a\tb"\t"""quoted"""')
+})
+
+test('tab-separated copying keeps link targets', async () => {
+  const table = tableOf('| Docs | Site |\n|--|--|\n| [guide](https://x.y/z) | https://a.b |')
+  expect(tableText(table)).toBe('Docs\tSite\nguide (https://x.y/z)\thttps://a.b')
+})
+
+test('HTML copying preserves repeated spaces inside code', async () => {
+  const table = tableOf('| Code |\n|--|\n| `a  b` |')
+  expect(tableHtml(table)).toContain('<code style="white-space: pre-wrap">a  b</code>')
 })
 
 test('copying a list returns its exact markdown', async ($, on) => {
@@ -72,6 +110,35 @@ test('table columns never exceed the terminal width', async $ => {
   expect(firstRow.reduce((a, b) => a + b, 0) + 2 * 4 <= 20).toBe(true)
   await ui.unmount()
 })
+
+test('a boxed row that wraps keeps its borders on every line', async $ => {
+  const file = 'handoffs/handoff-scheduled-event-pushes-21082026.md'
+  const evidence = 'Its blocking question is unanswered; BACKLOG row 16 cites it'
+  const ui = await $.ui.mount(mount(`| File | Evidence |\n|---|---|\n| ${file} | ${evidence} |`, 40))
+  const lines = await ui.findAll({ type: 'Text', text: /^│ $/ })
+  const cells = (await ui.findAll({ type: 'Box' })).filter(b => typeof b.props.width === 'number' && b.props.flexShrink === 0).slice(-2 * (lines.length - 1))
+  expect(lines.length > 3).toBe(true)
+  expect(cells.every(b => drawn(b).length <= (b.props.width as number))).toBe(true)
+  expect(cells.filter((_, i) => i % 2 === 0).map(drawn).join('')).toBe(file)
+  expect(cells.filter((_, i) => i % 2 === 1).map(drawn).join(' ')).toBe('Its blocking question is unanswered; BACKLOG row 16 cites it')
+  expect((await ui.find({ type: 'Text', text: /^16$/ }))?.props.color).toBe(PRESETS['catppuccin-mocha'].number)
+  await ui.unmount()
+})
+
+for (const [kind, cell] of [
+  ['named link', 'see [docs](https://github.com/org/repo/blob/main/docs/spec.md) for more'],
+  ['bare URL', 'https://example.com/a/rather/long/path/that/cannot/fit/on/one/line'],
+] as const) {
+  test(`a boxed row with a ${kind} keeps the link whole and clips its borders to the row`, async $ => {
+    const ui = await $.ui.mount(mount(`| n | link |\n|---|---|\n| 1 | ${cell} |`, 40))
+    const links = await ui.findAll({ type: 'Link' })
+    const clips = (await ui.findAll({ type: 'Box' })).filter(b => b.props.position === 'absolute' && b.props.overflow === 'hidden')
+    expect(links.length).toBe(1)
+    expect(clips.length).toBe(3)
+    expect(clips.every(b => drawn(b).split('\n').length > 2)).toBe(true)
+    await ui.unmount()
+  })
+}
 
 test('a link column is sized for the URL it shows', async $ => {
   const url = 'https://example.com/a/rather/long/path'
@@ -232,12 +299,21 @@ test('a half-streamed reply with an open fence and a cut table still draws', asy
 
 test('the help screen shows every element prismantis draws', async () => {
   const blocks = parse(showcaseText(Object.keys(PRESETS)), hl)
+  expect(showcaseText(Object.keys(PRESETS))).toContain('promptStyle')
+  expect(showcaseText([])).toContain('⧉ html')
+  expect(showcaseText([])).toContain('CopyQ')
+  expect(showcaseText([])).toContain('plain text')
+  expect(blocks.some(b => b.kind === 'table' && b.align.includes('right') && b.align.includes('center'))).toBe(true)
   const kinds = new Set(blocks.map(b => b.kind))
   for (const kind of ['heading', 'paragraph', 'list', 'code', 'quote', 'alert', 'rule', 'table']) expect(kinds.has(kind as never)).toBe(true)
   expect(new Set(blocks.flatMap(b => (b.kind === 'heading' ? [b.level] : []))).size >= 4).toBe(true)
   expect(new Set(blocks.flatMap(b => (b.kind === 'alert' ? [b.level] : []))).size).toBe(5)
   const langs = blocks.flatMap(b => (b.kind === 'code' ? [b.lang] : []))
   for (const lang of ['bash', 'json', 'mermaid']) expect(langs.includes(lang)).toBe(true)
+  const links = blocks.flatMap(b => (b.kind === 'paragraph' ? b.inline.filter(n => n.kind === 'link') : []))
+  expect(links.some(l => l.kind === 'link' && l.text !== l.href) && links.some(l => l.kind === 'link' && l.text === l.href)).toBe(true)
+  expect(blocks.some(b => b.kind === 'list' && b.items.some(i => i.task === true) && b.items.some(i => i.task === false) && b.items.some(i => i.depth > 0 && i.task !== undefined))).toBe(true)
+  expect(showcaseText([]).includes("toolStyle")).toBe(true)
 })
 
 test('every diagram on the help screen draws as art', async () => {
@@ -251,6 +327,10 @@ test('the help screen fits one screen: few blocks, two alerts, a table, a list a
   expect(blocks.length <= 12).toBe(true)
   expect(blocks.filter(b => b.kind === 'alert').length).toBe(2)
   for (const kind of ['heading', 'table', 'list']) expect(blocks.some(b => b.kind === kind)).toBe(true)
+  expect(blocks.some(b => b.kind === 'list' && b.items.some(i => i.task !== undefined))).toBe(true)
+  expect(blocks.some(b => b.kind === 'paragraph' && b.inline.some(n => n.kind === 'link'))).toBe(true)
+  expect(helpText(Object.keys(PRESETS))).toContain('/prismantis copy')
+  expect(helpText([])).toContain('HTML (macOS/Linux)')
   const diagrams = blocks.flatMap(b => (b.kind === 'code' && b.lang === 'mermaid' ? [b.lines.join('\n')] : []))
   expect(diagrams.length).toBe(2)
   for (const source of diagrams) expect(mermaidText(source, false, 100)).not.toBeNull()
@@ -265,5 +345,67 @@ test('the help screen draws as command output', async $ => {
     surface: 'terminal' as const,
   })
   expect(await ui.find({ type: 'Box', text: /prismantis/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('drawn replies add no emoji-capable glyphs', async $ => {
+  const text = ['sequenceDiagram\n  A->>B: go\n  B-->>A: ok', 'classDiagram\n  direction LR\n  A <|-- B\n  C --> D', 'graph RL\n  A-->B'].map(d => '```mermaid\n' + d + '\n```').join('\n\n')
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...mount(text), surface })
+    expect((await ui.find({ type: 'Text', text: /\p{Extended_Pictographic}/u }))?.text).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('a table art button copies boxed text ready for Slack', async ($, on) => {
+  const copied = stubClipboard(on)
+  const ui = await $.ui.mount(mount('| Queue | Sent |\n|---|--:|\n| tasks-east | 24 |\n| west | 0 |'))
+  const art = (await ui.findAll({ type: 'Button' }))[1]
+  await ui.press({ key: art!.key! })
+  expect(copied).toEqual([[
+    '```',
+    '┌────────────┬──────┐',
+    '│   Queue    │ Sent │',
+    '├────────────┼──────┤',
+    '│ tasks-east │   24 │',
+    '├────────────┼──────┤',
+    '│ west       │    0 │',
+    '└────────────┴──────┘',
+    '```',
+  ].join('\n')])
+  await ui.unmount()
+})
+
+test('wide table art wraps long cells to stay 100 columns wide', async () => {
+  const long = 'Wrong. With no default, databag_config raises No config key is found, so the render fails and nothing is applied, which is the fail-closed behaviour we want.'
+  const table = tableOf(`| Codebot says | Verdict |\n|---|---|\n| A missing x_seen_by renders an empty value | ${long} |`)
+  const lines = tableArt(table).split('\n')
+  const body = lines.slice(1, -1)
+  expect(body.every(l => [...l].length === [...body[0]!].length && [...l].length <= 100)).toBe(true)
+  expect(body.length > 6).toBe(true)
+  expect(body.filter(l => l.startsWith('│')).slice(1).map(l => l.split('│')[2]!.trim()).join(' ')).toBe(long)
+})
+
+test('short table columns keep their width next to a very wide one', async () => {
+  const links = Array.from({ length: 4 }, (_, i) => `https://example.com/releases/${100 + i}/notes`).join(' , ')
+  const [table] = parse(`| # | Pri | Task | Link |\n|---|---|---|---|\n| 10 | 🔵 P2 | Approved, not merged | ${links} |`, hl)
+  if (table?.kind !== 'table') throw new Error('not a table')
+  const cells = tableArt(table).split('\n').slice(1, -1).filter(l => l.startsWith('│')).map(l => l.split('│').slice(1, 4).map(c => c.trim()))
+  expect(cells[1]).toEqual(['10', '🔵 P2', 'Approved, not merged'])
+})
+
+test('copy reply copies the whole reply as written, Hebrew in reading order', { options: { rtl: 'warp' } }, async ($, on) => {
+  const copied = stubClipboard(on)
+  const text = 'שלום חברים, זו הדגמה של prismantis.\n\n| a | b |\n|---|---|\n| 1 | 2 |'
+  const ui = await $.ui.mount(mount(text))
+  const reply = (await ui.findAll({ type: 'Button' })).find(b => b.props.label === '⧉ copy reply')
+  await ui.press({ key: reply!.key! })
+  expect(copied).toEqual([text])
+  await ui.unmount()
+})
+
+test('a one-paragraph English block gets no copy reply button', async $ => {
+  const ui = await $.ui.mount(mount('Checking the tests next.'))
+  expect((await ui.findAll({ type: 'Button' })).some(b => b.props.label === '⧉ copy reply')).toBe(false)
   await ui.unmount()
 })

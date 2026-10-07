@@ -1,9 +1,10 @@
-import type { EngineInterface, Register, RenderElement } from 'claude-code'
+import type { EngineInterface, Register, RenderElement, RenderSurface } from 'claude-code'
 
 import { parse } from './markdown'
+import { clipboardCommand } from './clipboard'
 import { boxArt, mermaidText } from './mermaid'
 import type { Drawn } from './render'
-import { remember, renderBlocks, renderExpandedShell, renderToolGroup, renderToolRow, renderTurnDuration, width } from './render'
+import { remember, renderBlocks, renderExpandedShell, renderToolGroup, renderToolRow, renderTurnDuration, renderUserPrompt, width } from './render'
 import { helpText, rtlShowcaseText, showcaseText } from './help'
 import { PRESET_NAMES } from './presets'
 import type { Style } from './theme'
@@ -17,6 +18,7 @@ const HINT = [
   'flowcharts, sequence diagrams and xychart-beta bar or line charts.',
   'When a reply carries a numeric series or a flow that is easier to see than read, add one small diagram or chart with short labels.',
   'Skip diagrams for simple answers.',
+  'Put any command or snippet the user may run or copy in a fenced block with a language tag, never inline code: fenced blocks get a copy button, inline code does not.',
 ].join(' ')
 
 const detectTerminal = async ($: EngineInterface): Promise<Terminal | null> => {
@@ -45,21 +47,40 @@ const applyRtl = async ($: EngineInterface, style: Style): Promise<void> => {
 
 const expandedCalls = new Set<string>()
 
-const drawMarkdown = ($: EngineInterface, el: ReturnType<EngineInterface['ui']['resolve']>, style: Style, blocks: ReturnType<typeof parse>, columns: number): RenderElement[] => {
+const LOCAL_ONLY = 'HTML needs a local macOS or Linux graphical session'
+
+const copyTable = async ($: EngineInterface, html: string, text: string, surface: RenderSurface): Promise<string | null> => {
+  if (surface !== 'terminal' || await $.env.get('SSH_CONNECTION') || await $.env.get('SSH_TTY')) return LOCAL_ONLY
+  const helper = await $.fs.stat('/usr/bin/osascript').catch(() => null)
+  const backend = helper?.kind === 'file' ? 'macos'
+    : await $.env.get('WAYLAND_DISPLAY') || await $.env.get('DISPLAY') ? 'linux' : undefined
+  if (!backend) return LOCAL_ONLY
+  const command = clipboardCommand(backend, html, text)
+  const result = await $.process.run(command.argv, { stdin: command.stdin, timeoutMs: 5000 }).catch(() => null)
+  if (!result) return command.failure
+  return result.exitCode === 0 ? null : result.stderr.trim() || command.failure
+}
+
+const drawMarkdown = ($: EngineInterface, el: ReturnType<EngineInterface['ui']['resolve']>, style: Style, blocks: ReturnType<typeof parse>, columns: number, reply?: string): RenderElement[] => {
   const { Button } = el
-  const copy = (text: string, key: string, label = '⧉ copy') =>
-    style.copyButtons ? (
+  const copy = (text: string | (() => string), key: string, label = '⧉ copy', html?: () => string) => {
+    const copied = async (surface: RenderSurface): Promise<string> => {
+      const content = typeof text === 'function' ? text() : text
+      const failure = html ? await copyTable($, html(), content, surface) : undefined
+      if (failure === null) return 'Copied formatted table'
+      const result = await $.ui.copy({ text: content, surface })
+      if (!result.isCopied) return `Copy failed: ${result.reason}`
+      return failure ? `Copied as plain text (${failure})` : 'Copied'
+    }
+    return style.copyButtons ? (
       <Button
         key={key}
         variant="primary"
         label={label}
-        onPress={press => {
-          $.ui.copy({ text, surface: press.surface })
-            .then(r => $.ui.toast(r.isCopied ? 'Copied' : `Copy failed: ${r.reason}`))
-            .catch(() => $.ui.toast('Copy failed'))
-        }}
+        onPress={async press => $.ui.toast(await copied(press.surface).catch(() => 'Copy failed'))}
       />
     ) : null
+  }
   const drawn: Drawn = new Map()
   if (style.mermaid) {
     for (const [i, block] of blocks.entries()) {
@@ -68,14 +89,18 @@ const drawMarkdown = ($: EngineInterface, el: ReturnType<EngineInterface['ui']['
       if (art !== null && art.split('\n').every(l => width(l) <= columns - 2)) drawn.set(i, { element: boxArt(el, style, art, `b${i}`), art })
     }
   }
-  return renderBlocks(el, style, blocks, columns, drawn, copy)
+  const elements = renderBlocks(el, style, blocks, columns, drawn, copy)
+  const button = reply === undefined ? null : copy(reply, 'reply', '⧉ copy reply')
+  return button ? [...elements, <el.Box key="reply" alignSelf="flex-end">{button}</el.Box>] : elements
 }
 
 export const register: Register = (on, options) => {
+  on('engine.create', async (_$, e, next) => ({ ...(await next(e)), prismantis: { markdown: async () => undefined } }))
   if (options.enabled === false) return
   const style = resolveStyle(options)
   const parsed = new Map<string, ReturnType<typeof parse>>()
-  const parseCached = (text: string) => remember(parsed, text, () => parse(text, { numbers: style.highlightNumbers, paths: style.highlightPaths }))
+  const parseCached = (text: string, cache = parsed, limit?: number) => remember(cache, text, () => parse(text, { numbers: style.highlightNumbers, paths: style.highlightPaths }), limit)
+  const shared = new Map<string, ReturnType<typeof parse>>()
 
   if (options.toolRows !== false) {
     on('ui.render', { component: 'ToolGroup' }, ($, e, next) => {
@@ -83,10 +108,10 @@ export const register: Register = (on, options) => {
         for (const call of e.props.calls) if (call.tool_use_id) expandedCalls.add(call.tool_use_id)
         return next(e)
       }
-      return renderToolGroup($.ui.resolve(e), style, e.props.calls, e.props.isActive)
+      return renderToolGroup($.ui.resolve(e), style, e.props.calls, e.props.isActive, e.viewport?.columns)
     })
     on('ui.render', { component: 'ToolUse' }, ($, e, next) => {
-      if (!expandedCalls.has(e.props.tool_use_id)) return renderToolRow($.ui.resolve(e), style, e.props)
+      if (!expandedCalls.has(e.props.tool_use_id)) return renderToolRow($.ui.resolve(e), style, e.props, e.viewport?.columns)
       return e.props.tool === 'Bash' || e.props.tool === 'PowerShell' ? renderExpandedShell($.ui.resolve(e), style, e.props) : next(e)
     })
   }
@@ -95,7 +120,7 @@ export const register: Register = (on, options) => {
     await applyRtl($, style)
     const started = await next(e)
     await $.command
-      .register({ name: 'prismantis', description: 'Switch the prismantis theme, or list themes', argumentHint: '[theme <name>]' })
+      .register({ name: 'prismantis', description: 'Switch the prismantis theme, copy the last reply, or show the demo', argumentHint: '[theme <name> | copy [code] | demo]' })
       .catch(() => undefined)
     return started
   })
@@ -103,6 +128,14 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'prismantis' }, async ($, e) => {
     const [sub, name] = e.args.trim().split(/\s+/)
     if (sub === 'demo') return { text: showcaseText(PRESET_NAMES) }
+    if (sub === 'copy') {
+      const reply = (await $.session.messages()).findLast(m => m.role === 'assistant' && m.text.trim())
+      if (!reply) return { text: 'Nothing to copy yet.' }
+      const code = name === 'code' ? parseCached(reply.text).findLast(b => b.kind === 'code') : undefined
+      if (name === 'code' && code?.kind !== 'code') return { text: 'The last reply has no code block.' }
+      const result = await $.ui.copy({ text: code?.kind === 'code' ? code.lines.join('\n') : reply.text })
+      return { text: result.isCopied ? `Copied the last ${code ? 'code block' : 'reply'}.` : `Copy failed: ${result.reason}` }
+    }
     if (sub === 'demo-rtl') {
       await applyRtl($, style)
       return { text: rtlShowcaseText() }
@@ -131,21 +164,37 @@ export const register: Register = (on, options) => {
     return <Box flexDirection="column" rowGap={1} {...(style.reorder && hasRtl(e.props.text) ? { width: '100%' } : {})}>{drawMarkdown($, el, style, blocks, columns)}</Box>
   })
 
+  on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
+    const kind = e.props.origin.kind
+    const own = kind === 'composer' || kind === 'bridge' || (kind === 'unclassified' && !e.props.from && !e.props.task)
+    if (style.promptStyle === 'off' || !own) return next(e)
+    return renderUserPrompt($.ui.resolve(e), style, e.props.text, Math.max(20, (e.viewport?.columns ?? 100) - 4))
+  })
+
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
     const blocks = parseCached(e.props.text)
     if (blocks.length === 0) return next(e)
     const el = $.ui.resolve(e)
     const { Box, Text } = el
     const columns = Math.max(20, (e.viewport?.columns ?? 100) - 4)
+    const narration = style.toolStyle === 'tree-bold' && blocks.length === 1 && blocks[0]!.kind === 'paragraph'
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
-          <Text color={style.theme.accent}>{e.props.isFirstOfReply ? '⏺' : ' '}</Text>
+          <Text color={style.theme.accent}>{e.props.isFirstOfReply ? '●' : ' '}</Text>
         </Box>
         <Box flexDirection="column" rowGap={1} flexGrow={1}>
-          {drawMarkdown($, el, style, blocks, columns)}
+          {drawMarkdown($, el, narration ? { ...style, narration } : style, blocks, columns, blocks.length > 1 || hasRtl(e.props.text) ? e.props.text : undefined)}
         </Box>
       </Box>
     )
+  })
+
+  on('prismantis.markdown', ($, e, next) => {
+    const blocks = parseCached(e.text, shared, 20)
+    if (blocks.length === 0) return next(e)
+    const el = $.ui.resolve({ surface: e.surface, component: 'AssistantMessage' })
+    const { Box } = el
+    return { value: <Box flexDirection="column" rowGap={1} {...(style.reorder && hasRtl(e.text) ? { width: '100%' } : {})}>{drawMarkdown($, el, { ...style, copyButtons: false }, blocks, Math.max(20, e.columns || 0))}</Box> }
   })
 }

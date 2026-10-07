@@ -1,6 +1,6 @@
 {
   "name": "prismantis",
-  "version": "0.6.0",
+  "version": "0.11.0",
   "description": "Colorful, themeable rendering for Claude Code replies: tables, headings, code, numbers, paths and links.",
   "author": {
     "name": "Nahum Litvin",
@@ -17,6 +17,7 @@
     "colors",
     "terminal"
   ],
+  "types": "./types/index.d.ts",
   "userConfig": {
     "enabled": {
       "type": "boolean",
@@ -63,13 +64,35 @@
     "tableStyle": {
       "type": "string",
       "title": "Table style",
-      "description": "rules: a rule under the header and between rows. grid: heavier header rule, wider gaps. minimal: header rule only.",
-      "default": "rules",
+      "description": "box: every cell boxed, with a double line under the header. rules: a rule under the header and between rows. grid: heavier header rule, wider gaps. minimal: header rule only.",
+      "default": "box",
       "options": [
+        "box",
         "rules",
         "grid",
         "minimal"
       ]
+    },
+    "promptStyle": {
+      "type": "string",
+      "title": "Your prompt style",
+      "description": "How the prompts you type draw in the transcript. bubble: a rounded box in the accent color. bar: an accent bar on the left. chevron: a bold accent › before the text. off: Claude Code's own look.",
+      "default": "bubble",
+      "options": ["bubble", "bar", "chevron", "off"]
+    },
+    "toolStyle": {
+      "type": "string",
+      "title": "Tool row style",
+      "description": "How tool rows (Ran, Read, Edited) sit next to Claude's sentences. chat: tool rows dimmed on the right, Claude on the left. tree-dim: tucked under the sentence with ⎿ and dimmed. tree-bold: tree-dim plus one-line sentences in bold. classic: the original look.",
+      "default": "chat",
+      "options": ["chat", "tree-dim", "tree-bold", "classic"]
+    },
+    "taskStyle": {
+      "type": "string",
+      "title": "Task list style",
+      "description": "How - [ ] and - [x] items draw. checks: [ ] and [✓] with done items dimmed and struck through. ticks: ○ and ✓, done items dimmed. box: □ and ✓, done items dimmed and struck through. progress: ticks with a done-count bar above each list.",
+      "default": "checks",
+      "options": ["checks", "ticks", "box", "progress"]
     },
     "rtl": {
       "type": "string",
@@ -251,7 +274,7 @@
     "diagramHints": {
       "type": "boolean",
       "title": "Diagram hints",
-      "description": "Attach a short note, read by the model and never shown, to each prompt you type, saying tables, code, mermaid diagrams and charts render here. About 150 tokens per prompt. Off when mermaid is off.",
+      "description": "Attach a short note, read by the model and never shown, to each prompt you type, saying tables, code, mermaid diagrams and charts render here. About 190 tokens per prompt. Off when mermaid is off.",
       "default": true
     }
   }

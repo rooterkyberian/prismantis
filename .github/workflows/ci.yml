@@ -68,6 +68,40 @@ jobs:
           echo "vendor bytes: $size"
           test "$size" -lt 300000
 
+  clipboard:
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: scripts
+      - run: npm --prefix scripts run clipboard:check
+      - name: Install Linux clipboard tools and isolated displays
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wl-clipboard xclip xvfb xauth sway libxcb-cursor0 libxkbcommon-x11-0 libegl1 libopengl0
+      - name: Install CopyQ
+        if: runner.os == 'Linux'
+        run: |
+          curl --fail --location --retry 3 -o "$RUNNER_TEMP/copyq.AppImage" https://github.com/hluk/CopyQ/releases/download/v17.0.0/CopyQ-17.0.0-x86_64.AppImage
+          chmod +x "$RUNNER_TEMP/copyq.AppImage"
+          cd "$RUNNER_TEMP"
+          ./copyq.AppImage --appimage-extract > /dev/null
+          ln -s AppRun squashfs-root/copyq
+          echo "$RUNNER_TEMP/squashfs-root" >> "$GITHUB_PATH"
+          ./squashfs-root/copyq --version
+      - name: Verify HTML and plain text on Wayland and X11
+        if: runner.os == 'Linux'
+        run: dbus-run-session -- xvfb-run -a node scripts/clipboard-linux-check.mjs
+
   conventions:
     runs-on: ubuntu-latest
     steps:

@@ -12,6 +12,7 @@ export const load = async () => {
     stdin: {
       contents: [
         "export { parse } from './hooks/markdown.ts'",
+        "export { MAC_TABLE_COPY, LINUX_TABLE_COPY, clipboardCommand } from './hooks/clipboard.ts'",
         "export { renderBlocks } from './hooks/render.tsx'",
         "export { mermaidText, boxArt } from './hooks/mermaid.tsx'",
         "export { resolveStyle } from './hooks/theme.ts'",
@@ -31,7 +32,7 @@ export const load = async () => {
   globalThis.h = (type, props, ...children) => ({ type, props, children })
   globalThis.Fragment = 'Fragment'
   const lib = await import(pathToFileURL(out).href)
-  const el = { Box: 'Box', Text: 'Text', Button: 'Button' }
+  const el = { Box: 'Box', Text: 'Text', Button: 'Button', Link: 'Link' }
   const reply = (text, style, columns = 200) => {
     const blocks = lib.parse(text, { numbers: style.highlightNumbers, paths: style.highlightPaths })
     const drawn = new Map()

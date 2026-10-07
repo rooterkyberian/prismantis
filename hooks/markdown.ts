@@ -12,7 +12,7 @@ export type Inline =
 export type Block = { raw: string } & (
   | { kind: 'heading'; level: number; inline: Inline[] }
   | { kind: 'paragraph'; inline: Inline[] }
-  | { kind: 'list'; ordered: boolean; items: { marker: string; depth: number; inline: Inline[] }[] }
+  | { kind: 'list'; ordered: boolean; items: { marker: string; depth: number; task?: boolean; inline: Inline[] }[] }
   | { kind: 'code'; lang: string; lines: string[] }
   | { kind: 'quote'; inline: Inline[] }
   | { kind: 'alert'; level: AlertLevel; inline: Inline[] }
@@ -101,6 +101,9 @@ export const parseInline = (text: string, hl: Highlight): Inline[] => {
 export const inlineText = (inline: Inline[]): string =>
   inline.map(n => ('children' in n ? inlineText(n.children) : n.text)).join('')
 
+export const displayText = (inline: Inline[]): string =>
+  inline.map(n => (n.kind === 'link' && n.text !== n.href ? `${n.text} (${n.href})` : 'children' in n ? displayText(n.children) : n.text)).join('')
+
 export const parse = (source: string, hl: Highlight): Block[] => {
   const lines = source.replace(/\r\n?/g, '\n').split('\n')
   const at = (n: number) => lines[n] ?? ''
@@ -176,13 +179,14 @@ export const parse = (source: string, hl: Highlight): Block[] => {
       flush(i)
       const start = i
       const ordered = /\d/.test(item[2] ?? '')
-      const items: { marker: string; depth: number; inline: Inline[] }[] = []
+      const items: { marker: string; depth: number; task?: boolean; inline: Inline[] }[] = []
       const contentIndent: number[] = []
       while (i < lines.length) {
         const it = LIST_ITEM.exec(at(i))
         if (it) {
           contentIndent.push((it[1] ?? '').replace(/\t/g, '  ').length + (it[2] ?? '').length + 1)
-          items.push({ marker: it[2] ?? '-', depth: Math.floor((it[1] ?? '').replace(/\t/g, '  ').length / 2), inline: parseInline(it[3] ?? '', hl) })
+          const task = /^\[([ xX])\]\s+(.*)$/.exec(it[3] ?? '')
+          items.push({ marker: it[2] ?? '-', depth: Math.floor((it[1] ?? '').replace(/\t/g, '  ').length / 2), ...(task ? { task: task[1] !== ' ' } : {}), inline: parseInline(task ? task[2]! : it[3] ?? '', hl) })
         } else if (/^\s{2,}\S/.test(at(i)) && items.length) {
           const indent = (at(i).match(/^\s*/)?.[0] ?? '').replace(/\t/g, '  ').length
           let owner = items.length - 1

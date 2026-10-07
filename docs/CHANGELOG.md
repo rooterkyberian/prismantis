@@ -2,6 +2,71 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Tables offer `⧉ md`, `⧉ art` and `⧉ html` copy actions. HTML copying preserves headers, column alignment and inline formatting from local macOS and Linux terminals. Both HTML and tab-separated plain text must be copied and verified before success is reported. Linux requires CopyQ running in the graphical session; without it, or on other platforms, over SSH and on desktop, the action copies the plain text alone.
+
+### Fixed
+
+- A short table column next to a very wide one no longer breaks inside its words (`10` drawn as `1`/`0`). Columns that fit their share keep their full width, and only the wide ones split the rest.
+- Boxed tables keep their borders on every line of a row whose cells wrap. The `│` bars used to stop after the first line, leaving the rest of the row open. Rows with a link keep their link whole and get borders that follow the row's height, in terminals with or without clickable links ([#48](https://github.com/NahumLitvin/prismantis/pull/48), with @b33eep).
+
+## [0.11.0] - 2026-10-06
+
+### Added
+
+- Other mods can draw markdown the way prismantis draws replies: `$.prismantis.markdown({ surface, text, columns })` answers the drawn tree, without copy buttons, for their own panes and bands. The types ship as a contract in `types/index.d.ts` ([#38](https://github.com/NahumLitvin/prismantis/pull/38), thanks @Malorn44).
+
+## [0.10.0] - 2026-10-06
+
+### Added
+
+- Your own prompts draw in the theme: a rounded bubble by default, or an accent bar or a bold chevron with the new `promptStyle` option (`off` keeps Claude Code's look). Task notifications and teammate messages are left alone ([#14](https://github.com/NahumLitvin/prismantis/issues/14)).
+- `toolStyle` keeps tool rows apart from Claude's sentences: `chat` (the default) puts them dimmed on the right, `tree-dim` tucks them under with `⎿`, `tree-bold` adds bold one-line sentences, `classic` keeps the old look.
+
+## [0.9.0] - 2026-10-06
+
+### Added
+
+- Links and bare URLs are clickable: they draw as terminal hyperlinks (OSC 8) and as anchors on desktop. Terminals without hyperlinks show the URL after the text, as before ([#9](https://github.com/NahumLitvin/prismantis/issues/9)).
+- `/prismantis copy` copies the last reply and `/prismantis copy code` its last code block, a keyboard path that does not need a click ([#28](https://github.com/NahumLitvin/prismantis/issues/28)).
+
+### Fixed
+
+- The README no longer says `ctrl+x` then `tab` focuses the copy buttons. Since Claude Code 2.1.291 that chord focuses the area above the prompt.
+
+## [0.8.0] - 2026-10-05
+
+### Added
+
+- Replies end with a `⧉ copy reply` button that copies the reply as Claude wrote it. One-line English narration gets none, so the button sits where there is something worth copying. Selecting Hebrew or Arabic on screen copies it in drawn order, reversed; this copies it in reading order.
+
+### Changed
+
+- `/prismantis` and `/prismantis demo` show task lists.
+- Tables draw boxed by default: every cell in a box, with a double line under the header. `tableStyle` adds `box` as the new default; `rules`, `grid` and `minimal` stay for a lighter look.
+- Tables get a second button, `⧉ art`, that copies a plain boxed table for Slack and chat, inside a ``` code block and wrapped to 100 columns so wide tables keep their shape. `⧉ copy` still gives the markdown.
+
+## [0.7.1] - 2026-10-05
+
+### Fixed
+
+- On Windows the reply marker and the filled arrowheads in sequence and class diagrams drew as color emoji. The marker is now `●`, the same dot Claude Code uses off macOS, and the arrowheads are `►` and `◄`. A test fails if a drawn reply ever adds an emoji-capable character again ([#6](https://github.com/NahumLitvin/prismantis/issues/6)).
+
+## [0.7.0] - 2026-10-05
+
+### Added
+
+- Task lists: `- [ ]` and `- [x]` draw as `[ ]` and `[✓]`, with done items dimmed and struck through. The new `taskStyle` option picks `checks` (the default), `ticks`, `box` or `progress`, which adds a done-count bar above each list. The copy button still copies the markdown as written ([#10](https://github.com/NahumLitvin/prismantis/issues/10)).
+
+## [0.6.1] - 2026-10-05
+
+### Changed
+
+- The model-only note asks Claude to put commands and snippets you may copy in fenced code blocks, which get a copy button, instead of inline code, which does not. The note is now about 190 tokens per prompt.
+
 ## [0.6.0] - 2026-10-04
 
 ### Added
